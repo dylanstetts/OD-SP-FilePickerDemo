@@ -1,0 +1,176 @@
+@{
+    ViewData["Title"] = "CSV Viewer";
+}
+
+<div class="row mt-4">
+    <div class="col-12">
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a asp-controller="Home" asp-action="Index">Home</a></li>
+                <li class="breadcrumb-item"><a asp-controller="Home" asp-action="FilePicker">File Picker</a></li>
+                <li class="breadcrumb-item active" id="breadcrumbFileName">CSV Data</li>
+            </ol>
+        </nav>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0" id="cardTitle">CSV Data</h5>
+                <div>
+                    <span class="badge bg-info" id="columnCount">0 columns</span>
+                    <span class="badge bg-success" id="rowCount">0 rows</span>
+                    <a asp-controller="Home" asp-action="FilePicker" class="btn btn-outline-primary btn-sm ms-2">
+                        ← Pick Another File
+                    </a>
+                </div>
+            </div>
+            <div class="card-body csv-table" id="csvTableContainer">
+                <div class="text-center py-5" id="loadingState">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <p class="mt-2">Parsing CSV data...</p>
+                </div>
+                <div id="tableContainer" class="d-none"></div>
+                <div id="errorState" class="d-none">
+                    <div class="alert alert-warning">
+                        <h5>No data found</h5>
+                        <p>The CSV file appears to be empty or could not be parsed.</p>
+                        <a asp-controller="Home" asp-action="FilePicker" class="btn btn-primary">Pick Another File</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+@section Styles {
+    <style>
+        .csv-table {
+            max-height: calc(100vh - 300px);
+            overflow: auto;
+        }
+        .csv-table thead th {
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+    </style>
+}
+
+@section Scripts {
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Get CSV content from sessionStorage
+            const csvContent = sessionStorage.getItem('csvContent');
+            const fileName = sessionStorage.getItem('csvFileName') || 'CSV Data';
+
+            // Update UI with filename
+            document.getElementById('breadcrumbFileName').textContent = fileName;
+            document.getElementById('cardTitle').textContent = `${fileName}`;
+
+            if (!csvContent) {
+                document.getElementById('loadingState').classList.add('d-none');
+                document.getElementById('errorState').classList.remove('d-none');
+                return;
+            }
+
+            // Parse CSV client-side
+            try {
+                const result = parseCSV(csvContent);
+                displayTable(result);
+            } catch (error) {
+                console.error('Error parsing CSV:', error);
+                document.getElementById('loadingState').classList.add('d-none');
+                document.getElementById('errorState').classList.remove('d-none');
+            }
+
+            // Clear session storage
+            sessionStorage.removeItem('csvContent');
+            sessionStorage.removeItem('csvFileName');
+        });
+
+        function parseCSV(csvContent) {
+            const lines = csvContent.split('\n').filter(line => line.trim() !== '');
+            if (lines.length === 0) {
+                return { headers: [], rows: [] };
+            }
+
+            // Parse header
+            const headers = parseCSVLine(lines[0]);
+            
+            // Parse rows
+            const rows = [];
+            for (let i = 1; i < lines.length; i++) {
+                const row = parseCSVLine(lines[i]);
+                if (row.length > 0) {
+                    rows.push(row);
+                }
+            }
+
+            return { headers, rows };
+        }
+
+        function parseCSVLine(line) {
+            const result = [];
+            let current = '';
+            let inQuotes = false;
+
+            for (let i = 0; i < line.length; i++) {
+                const char = line[i];
+                
+                if (char === '"') {
+                    inQuotes = !inQuotes;
+                } else if (char === ',' && !inQuotes) {
+                    result.push(current.trim());
+                    current = '';
+                } else {
+                    current += char;
+                }
+            }
+            
+            result.push(current.trim());
+            return result;
+        }
+
+        function displayTable(data) {
+            const { headers, rows } = data;
+
+            // Update counts
+            document.getElementById('columnCount').textContent = `${headers.length} columns`;
+            document.getElementById('rowCount').textContent = `${rows.length} rows`;
+
+            // Build table HTML
+            let tableHtml = '<table class="table table-striped table-bordered table-hover"><thead class="table-dark sticky-top"><tr><th>#</th>';
+            
+            for (const header of headers) {
+                tableHtml += `<th>${escapeHtml(header)}</th>`;
+            }
+            tableHtml += '</tr></thead><tbody>';
+
+            for (let i = 0; i < rows.length; i++) {
+                tableHtml += `<tr><td class="text-muted">${i + 1}</td>`;
+                for (const cell of rows[i]) {
+                    tableHtml += `<td>${escapeHtml(cell)}</td>`;
+                }
+                tableHtml += '</tr>';
+            }
+
+            tableHtml += '</tbody></table>';
+
+            // Display table
+            document.getElementById('loadingState').classList.add('d-none');
+            document.getElementById('tableContainer').innerHTML = tableHtml;
+            document.getElementById('tableContainer').classList.remove('d-none');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+}

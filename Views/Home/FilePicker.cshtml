@@ -1,0 +1,862 @@
+@model FilePickerViewModel
+@{
+    ViewData["Title"] = "File Picker";
+}
+
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">Select a CSV File</h5>
+                <div>
+                    <span id="tokenStatus" class="badge bg-secondary me-2">Acquiring token...</span>
+                    <button id="btnPickOneDrive" class="btn btn-primary btn-sm" disabled>
+                        OneDrive Files
+                    </button>
+                    <button id="btnPickSharePoint" class="btn btn-success btn-sm" disabled>
+                        SharePoint Sites
+                    </button>
+                    <button id="btnPickShared" class="btn btn-info btn-sm" disabled>
+                        Shared With Me
+                    </button>
+                </div>
+            </div>
+            <div class="card-body">
+                <div id="loadingIndicator" class="text-center py-5 d-none">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <p class="mt-2">Opening file picker...</p>
+                </div>
+                
+                <div id="instructions" class="text-center py-5">
+                    <div class="display-1 text-muted"></div>
+                    <h4 class="mt-3">Choose a source to browse CSV files</h4>
+                    <p class="text-muted">
+                        Select from your OneDrive, SharePoint sites, or files shared with you
+                    </p>
+                </div>
+
+                <div id="selectedFile" class="d-none">
+                    <div class="alert alert-success">
+                        <h5>Selected File:</h5>
+                        <p id="selectedFileName" class="mb-0"></p>
+                    </div>
+                    <div class="text-center">
+                        <button id="btnViewCsv" class="btn btn-primary btn-lg">
+                            View CSV Data
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="mb-0">Activity Log</h6>
+            </div>
+            <div class="card-body">
+                <pre id="activityLog" style="height: 200px; overflow-y: auto; background: #f8f9fa; padding: 10px; font-size: 0.85rem;"></pre>
+            </div>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+    <!-- MSAL.js for client-side token acquisition -->
+    <script src="https://alcdn.msauth.net/browser/2.38.0/js/msal-browser.min.js"></script>
+    
+    <script>
+        // Configuration from server
+        const clientId = '@Model.ClientId';
+        const tenantId = '@Model.TenantId';
+        
+        // SharePoint/OneDrive URLs from configuration
+        const SHAREPOINT_URL = '@Model.SharePointUrl';
+        const ONEDRIVE_URL = '@Model.OneDriveUrl';
+        
+        // Dedicated redirect URI for MSAL popup - must be registered as SPA redirect in Azure AD
+        // Register https://localhost/Home/AuthRedirect as a SPA redirect URI in your app registration
+        const redirectUri = window.location.origin + '/Home/AuthRedirect';
+        
+        // MSAL configuration
+        const msalConfig = {
+            auth: {
+                clientId: clientId,
+                authority: `https://login.microsoftonline.com/${tenantId}`,
+                redirectUri: redirectUri
+            },
+            cache: {
+                cacheLocation: "sessionStorage",
+                storeAuthStateInCookie: false
+            }
+        };
+        
+        // Initialize MSAL
+        const msalInstance = new msal.PublicClientApplication(msalConfig);
+        
+        // API Logging Infrastructure - sends logs to server
+        const pendingRequestLogs = [];
+        const pendingResponseLogs = [];
+        let logFlushTimer = null;
+        
+        // Generate unique request ID
+        function generateRequestId() {
+            return 'req-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+        }
+        
+        // Send logs to server
+        async function flushLogsToServer() {
+            if (pendingRequestLogs.length === 0 && pendingResponseLogs.length === 0) {
+                return;
+            }
+            
+            const requests = [...pendingRequestLogs];
+            const responses = [...pendingResponseLogs];
+            pendingRequestLogs.length = 0;
+            pendingResponseLogs.length = 0;
+            
+            try {
+                // Use originalFetch to avoid recursive logging
+                await originalFetch('/api/ApiLog/batch', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        requests: requests,
+                        responses: responses
+                    })
+                });
+            } catch (error) {
+                console.error('Failed to flush logs to server:', error);
+                // Re-queue failed logs
+                pendingRequestLogs.push(...requests);
+                pendingResponseLogs.push(...responses);
+            }
+        }
+        
+        // Schedule log flush (debounced)
+        function scheduleLogFlush() {
+            if (logFlushTimer) {
+                clearTimeout(logFlushTimer);
+            }
+            logFlushTimer = setTimeout(flushLogsToServer, 1000);
+        }
+        
+        // Wrap fetch to log all API calls (except our own log calls)
+        const originalFetch = window.fetch;
+        
+        // Redact sensitive information from headers for logging
+        function redactHeaders(headers) {
+            const redacted = {};
+            for (const [key, value] of Object.entries(headers)) {
+                const lowerKey = key.toLowerCase();
+                if (lowerKey === 'authorization') {
+                    // Redact bearer token, keep first 10 chars for debugging
+                    if (value.toLowerCase().startsWith('bearer ')) {
+                        redacted[key] = 'Bearer [REDACTED]';
+                    } else {
+                        redacted[key] = '[REDACTED]';
+                    }
+                } else if (lowerKey.includes('token') || lowerKey.includes('key') || lowerKey.includes('secret')) {
+                    redacted[key] = '[REDACTED]';
+                } else {
+                    redacted[key] = value;
+                }
+            }
+            return redacted;
+        }
+        
+        window.fetch = async function(url, options = {}) {
+            const urlString = url.toString();
+            
+            // Don't log our own logging calls
+            if (urlString.includes('/api/ApiLog/')) {
+                return originalFetch(url, options);
+            }
+            
+            const requestId = generateRequestId();
+            const clientRequestId = generateChannelId();
+            const timestamp = new Date().toISOString();
+            const method = options.method || 'GET';
+            
+            // Add client-request-id header if not present
+            if (!options.headers) options.headers = {};
+            if (!options.headers['client-request-id']) {
+                options.headers['client-request-id'] = clientRequestId;
+            }
+            
+            // Redact sensitive headers before logging
+            const redactedHeaders = redactHeaders(options.headers || {});
+            
+            // Queue request log for server
+            pendingRequestLogs.push({
+                timestamp: timestamp,
+                requestId: requestId,
+                clientRequestId: clientRequestId,
+                method: method,
+                endpoint: urlString,
+                headers: JSON.stringify(redactedHeaders)
+            });
+            scheduleLogFlush();
+            log(`API Request: ${method} ${urlString.substring(0, 80)}...`);
+            
+            try {
+                const response = await originalFetch(url, options);
+                const responseTimestamp = new Date().toISOString();
+                
+                // Extract response headers of interest
+                const responseHeaders = {};
+                response.headers.forEach((value, key) => {
+                    responseHeaders[key] = value;
+                });
+                
+                // Queue response log for server
+                pendingResponseLogs.push({
+                    timestamp: responseTimestamp,
+                    requestId: requestId,
+                    clientRequestId: responseHeaders['client-request-id'] || clientRequestId,
+                    requestTimestamp: timestamp,
+                    endpoint: urlString,
+                    status: response.status,
+                    statusText: response.statusText,
+                    msRequestId: responseHeaders['request-id'] || responseHeaders['x-ms-request-id'] || '',
+                    spRequestGuid: responseHeaders['sprequestguid'] || '',
+                    xMsClientRequestId: responseHeaders['x-ms-client-request-id'] || '',
+                    contentType: responseHeaders['content-type'] || '',
+                    date: responseHeaders['date'] || '',
+                    error: ''
+                });
+                scheduleLogFlush();
+                log(`API Response: ${response.status} ${response.statusText}`);
+                
+                return response;
+            } catch (error) {
+                // Queue error log for server
+                pendingResponseLogs.push({
+                    timestamp: new Date().toISOString(),
+                    requestId: requestId,
+                    clientRequestId: clientRequestId,
+                    requestTimestamp: timestamp,
+                    endpoint: urlString,
+                    status: 0,
+                    statusText: 'NETWORK_ERROR',
+                    msRequestId: '',
+                    spRequestGuid: '',
+                    xMsClientRequestId: '',
+                    contentType: '',
+                    date: '',
+                    error: error.message
+                });
+                scheduleLogFlush();
+                log(`API Error: ${error.message}`);
+                throw error;
+            }
+        };
+        
+        // Flush logs before page unload
+        window.addEventListener('beforeunload', () => {
+            if (pendingRequestLogs.length > 0 || pendingResponseLogs.length > 0) {
+                // Use sendBeacon for reliable delivery on page close
+                const data = JSON.stringify({
+                    requests: pendingRequestLogs,
+                    responses: pendingResponseLogs
+                });
+                navigator.sendBeacon('/api/ApiLog/batch', new Blob([data], { type: 'application/json' }));
+            }
+        });
+        
+        // Manual flush button handler
+        async function flushLogsNow() {
+            log('Flushing logs to server...');
+            await flushLogsToServer();
+            log('Logs flushed successfully. Check Logs folder on server.');
+        }
+        
+        let pickerWindow = null;
+        let messagePort = null;
+        let selectedFileInfo = null;
+        let currentBaseUrl = ONEDRIVE_URL;
+        let isAuthenticated = false;
+
+        // Check if we're in a popup/iframe context (MSAL redirect target)
+        function isInPopupOrIframe() {
+            try {
+                return window.opener !== null || window.self !== window.top;
+            } catch (e) {
+                return true; // If we can't access, we're likely in a cross-origin iframe
+            }
+        }
+
+        // Logging utility
+        function log(message) {
+            const logEl = document.getElementById('activityLog');
+            if (!logEl) return; // Don't log if we're in popup context without DOM
+            const timestamp = new Date().toLocaleTimeString();
+            logEl.textContent += `[${timestamp}] ${message}\n`;
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        // Generate a unique channel ID
+        function generateChannelId() {
+            return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+        }
+
+        // Update token status UI
+        function updateTokenStatus(status, isSuccess) {
+            const statusEl = document.getElementById('tokenStatus');
+            if (!statusEl) return; // Guard for popup context
+            statusEl.textContent = status;
+            statusEl.className = `badge me-2 ${isSuccess ? 'bg-success' : 'bg-danger'}`;
+            
+            // Enable/disable picker buttons
+            const buttons = ['btnPickOneDrive', 'btnPickSharePoint', 'btnPickShared'];
+            buttons.forEach(id => {
+                const btn = document.getElementById(id);
+                if (btn) btn.disabled = !isSuccess;
+            });
+        }
+
+        // Initialize authentication on page load
+        async function initializeAuth() {
+            // First, initialize MSAL and handle any redirect
+            await msalInstance.initialize();
+            
+            // If we're in a popup, just handle the redirect and let MSAL close the popup
+            if (isInPopupOrIframe()) {
+                console.log('Running in popup/iframe context - handling redirect only');
+                try {
+                    await msalInstance.handleRedirectPromise();
+                } catch (e) {
+                    console.log('Popup redirect handling:', e);
+                }
+                // Don't proceed with page initialization in popup
+                return;
+            }
+            
+            log('Initializing MSAL authentication...');
+            
+            try {
+                // Handle redirect response if any
+                const response = await msalInstance.handleRedirectPromise();
+                if (response) {
+                    log('Handled redirect response');
+                }
+                
+                // Check for existing accounts
+                const accounts = msalInstance.getAllAccounts();
+                if (accounts.length > 0) {
+                    log(`Found ${accounts.length} cached account(s)`);
+                    // Try to acquire token silently for OneDrive
+                    await acquireInitialToken();
+                } else {
+                    log('No cached accounts, will authenticate on first token request');
+                    // Trigger login to get initial token
+                    await acquireInitialToken();
+                }
+            } catch (error) {
+                log(`Initialization error: ${error.message}`);
+                updateTokenStatus('Auth Failed', false);
+            }
+        }
+
+        // Acquire initial token - first login, then we can get tokens silently
+        async function acquireInitialToken() {
+            log('Starting authentication...');
+            
+            try {
+                const accounts = msalInstance.getAllAccounts();
+                
+                if (accounts.length > 0) {
+                    log(`Found cached account: ${accounts[0].username}`);
+                    isAuthenticated = true;
+                    updateTokenStatus('Authenticated', true);
+                    return;
+                }
+                
+                // Use loginPopup to sign in first
+                log('Opening login popup...');
+                log(`Redirect URI: ${msalConfig.auth.redirectUri}`);
+                
+                const loginRequest = {
+                    scopes: ['openid', 'profile', 'User.Read'],
+                    prompt: 'select_account'
+                };
+                
+                try {
+                    const loginResponse = await msalInstance.loginPopup(loginRequest);
+                    log(`Logged in as: ${loginResponse.account.username}`);
+                    isAuthenticated = true;
+                    updateTokenStatus('Authenticated', true);
+                } catch (popupError) {
+                    // If popup fails, try redirect flow as fallback
+                    if (popupError.errorCode === 'popup_window_error' || 
+                        popupError.errorCode === 'user_cancelled' ||
+                        popupError.errorCode === 'empty_window_error') {
+                        log(`Popup failed (${popupError.errorCode}), trying redirect flow...`);
+                        updateTokenStatus('Redirecting to login...', false);
+                        // Use redirect flow instead
+                        await msalInstance.loginRedirect(loginRequest);
+                        return;
+                    }
+                    throw popupError;
+                }
+                
+            } catch (error) {
+                log(`Login error: ${error.errorCode || 'unknown'} - ${error.message}`);
+                console.error('Full error:', error);
+                updateTokenStatus('Auth Failed - Refresh to retry', false);
+            }
+        }
+
+        // Get token for a SharePoint/OneDrive resource using MSAL.js (for file picker)
+        async function getToken(resource) {
+            log(`Requesting SharePoint token for: ${resource}`);
+            
+            // Use AllSites.Read for SharePoint/OneDrive access (delegated permission)
+            // This is required for the file picker to work
+            const scopes = [`${resource}/AllSites.Read`];
+            
+            try {
+                // Try silent token acquisition first
+                const accounts = msalInstance.getAllAccounts();
+                if (accounts.length === 0) {
+                    throw new Error('No authenticated user. Please sign in first.');
+                }
+                
+                const silentRequest = {
+                    scopes: scopes,
+                    account: accounts[0]
+                };
+                
+                try {
+                    const response = await msalInstance.acquireTokenSilent(silentRequest);
+                    log('SharePoint token acquired silently');
+                    return response.accessToken;
+                } catch (silentError) {
+                    log('Silent token acquisition failed, trying popup...');
+                }
+                
+                // Fall back to popup - this may require consent
+                const popupRequest = {
+                    scopes: scopes
+                };
+                
+                const response = await msalInstance.acquireTokenPopup(popupRequest);
+                log('Token acquired via popup');
+                return response.accessToken;
+                
+            } catch (error) {
+                log(`Error getting SharePoint token: ${error.message}`);
+                throw error;
+            }
+        }
+
+        // Get token for Microsoft Graph API (for file downloads)
+        async function getGraphToken() {
+            log('Requesting Microsoft Graph token...');
+            
+            // Use Files.Read.All for reading files via Graph API
+            const scopes = ['https://graph.microsoft.com/Files.Read.All'];
+            
+            try {
+                const accounts = msalInstance.getAllAccounts();
+                if (accounts.length === 0) {
+                    throw new Error('No authenticated user. Please sign in first.');
+                }
+                
+                const silentRequest = {
+                    scopes: scopes,
+                    account: accounts[0]
+                };
+                
+                try {
+                    const response = await msalInstance.acquireTokenSilent(silentRequest);
+                    log('Graph token acquired silently');
+                    return response.accessToken;
+                } catch (silentError) {
+                    log('Silent Graph token acquisition failed, trying popup...');
+                }
+                
+                // Fall back to popup - this may require consent
+                const popupRequest = {
+                    scopes: scopes
+                };
+                
+                const response = await msalInstance.acquireTokenPopup(popupRequest);
+                log('Graph token acquired via popup');
+                return response.accessToken;
+                
+            } catch (error) {
+                log(`Error getting Graph token: ${error.message}`);
+                throw error;
+            }
+        }
+
+        // Initialize the file picker
+        async function openFilePicker(entryType) {
+            log(`Opening file picker for: ${entryType}`);
+            
+            document.getElementById('loadingIndicator').classList.remove('d-none');
+            document.getElementById('instructions').classList.add('d-none');
+            
+            try {
+                // Use hardcoded base URL based on entry type
+                const baseUrl = (entryType === 'sharepoint') ? SHAREPOINT_URL : ONEDRIVE_URL;
+                currentBaseUrl = baseUrl;
+                log(`Using base URL: ${baseUrl}`);
+
+                // Get token for the picker
+                const accessToken = await getToken(baseUrl);
+                log('Token acquired successfully');
+
+                // Generate channel ID
+                const channelId = generateChannelId();
+                log(`Channel ID: ${channelId}`);
+
+                // Build picker configuration based on entry type
+                let entry = {};
+                let pivots = {};
+                
+                switch (entryType) {
+                    case 'onedrive':
+                        entry = { oneDrive: { files: {} } };
+                        pivots = { oneDrive: true, recent: true };
+                        break;
+                    case 'sharepoint':
+                        entry = { sharePoint: { byPath: { web: SHAREPOINT_URL } } };
+                        pivots = { sharedLibraries: true, recent: true };
+                        break;
+                    case 'shared':
+                        // Use sharedWithMe entry point for shared files
+                        entry = { oneDrive: { sharedWithMe: {} } };
+                        pivots = { sharedWithMe: true, recent: true };
+                        break;
+                }
+
+                const pickerConfig = {
+                    sdk: "8.0",
+                    entry: entry,
+                    authentication: {},
+                    messaging: {
+                        origin: window.location.origin,
+                        channelId: channelId
+                    },
+                    typesAndSources: {
+                        mode: "files",
+                        filters: [".csv"],
+                        pivots: pivots
+                    },
+                    selection: {
+                        mode: "single"
+                    }
+                };
+
+                log('Opening picker window...');
+
+                // Open picker window
+                pickerWindow = window.open('', 'OneDrivePicker', 'width=1080,height=680');
+
+                if (!pickerWindow) {
+                    log('Popup blocked! Please allow popups for this site.');
+                    resetUI();
+                    return;
+                }
+
+                // Build the query string
+                const queryString = new URLSearchParams({
+                    filePicker: JSON.stringify(pickerConfig),
+                    locale: 'en-us'
+                });
+
+                const pickerUrl = `${baseUrl}/_layouts/15/FilePicker.aspx?${queryString}`;
+
+                // Create form and POST to picker
+                const form = pickerWindow.document.createElement('form');
+                form.setAttribute('action', pickerUrl);
+                form.setAttribute('method', 'POST');
+
+                const tokenInput = pickerWindow.document.createElement('input');
+                tokenInput.setAttribute('type', 'hidden');
+                tokenInput.setAttribute('name', 'access_token');
+                tokenInput.setAttribute('value', accessToken);
+                form.appendChild(tokenInput);
+
+                pickerWindow.document.body.appendChild(form);
+                form.submit();
+
+                log('Picker form submitted, waiting for initialization...');
+
+                // Set up message listener
+                window.addEventListener('message', handlePickerMessage);
+
+            } catch (error) {
+                log(`Error: ${error.message}`);
+                resetUI();
+            }
+        }
+
+        // Handle messages from the picker
+        async function handlePickerMessage(event) {
+            if (!pickerWindow || event.source !== pickerWindow) {
+                return;
+            }
+
+            const message = event.data;
+            log(`Received message type: ${message.type}`);
+
+            if (message.type === 'initialize') {
+                log('Picker initialized, setting up message channel');
+                messagePort = event.ports[0];
+                messagePort.addEventListener('message', handleChannelMessage);
+                messagePort.start();
+
+                messagePort.postMessage({
+                    type: 'activate'
+                });
+            }
+        }
+
+        // Handle messages from the picker channel
+        async function handleChannelMessage(event) {
+            const payload = event.data;
+            log(`Channel message: ${payload.type}`);
+            
+            // Log picker communication to server
+            const pickerLogEntry = {
+                timestamp: new Date().toISOString(),
+                requestId: `picker-${payload.id || generateRequestId()}`,
+                clientRequestId: '',
+                method: 'PICKER_MESSAGE',
+                endpoint: `picker://${payload.type}`,
+                headers: JSON.stringify({
+                    messageType: payload.type,
+                    messageId: payload.id,
+                    data: payload.data ? JSON.stringify(payload.data).substring(0, 500) : ''
+                })
+            };
+            pendingRequestLogs.push(pickerLogEntry);
+            scheduleLogFlush();
+
+            switch (payload.type) {
+                case 'notification':
+                    const notification = payload.data;
+                    log(`Notification: ${notification.notification}`);
+                    if (notification.notification === 'page-loaded') {
+                        log('Picker page loaded and ready');
+                        document.getElementById('loadingIndicator').classList.add('d-none');
+                    }
+                    break;
+
+                case 'command':
+                    // Acknowledge the command
+                    messagePort.postMessage({
+                        type: 'acknowledge',
+                        id: payload.id
+                    });
+
+                    const command = payload.data;
+                    log(`Command: ${command.command}`);
+                    
+                    // Log the authenticate command which shows what API resources the picker needs
+                    if (command.command === 'authenticate') {
+                        log(`Picker requesting token for resource: ${command.resource}`);
+                        
+                        // Log this as a response showing what SharePoint endpoint is being used
+                        pendingResponseLogs.push({
+                            timestamp: new Date().toISOString(),
+                            requestId: `picker-auth-${payload.id}`,
+                            clientRequestId: '',
+                            requestTimestamp: pickerLogEntry.timestamp,
+                            endpoint: command.resource,
+                            status: 0,
+                            statusText: 'PICKER_AUTH_REQUEST',
+                            msRequestId: '',
+                            spRequestGuid: '',
+                            xMsClientRequestId: '',
+                            contentType: '',
+                            date: '',
+                            error: ''
+                        });
+                        scheduleLogFlush();
+                    }
+
+                    switch (command.command) {
+                        case 'authenticate':
+                            try {
+                                const token = await getToken(command.resource);
+                                messagePort.postMessage({
+                                    type: 'result',
+                                    id: payload.id,
+                                    data: {
+                                        result: 'token',
+                                        token: token
+                                    }
+                                });
+                                log('Token provided to picker');
+                            } catch (error) {
+                                messagePort.postMessage({
+                                    type: 'result',
+                                    id: payload.id,
+                                    data: {
+                                        result: 'error',
+                                        error: {
+                                            code: 'unableToObtainToken',
+                                            message: error.message
+                                        }
+                                    }
+                                });
+                            }
+                            break;
+
+                        case 'close':
+                            log('Picker closed by user');
+                            if (pickerWindow) {
+                                pickerWindow.close();
+                            }
+                            resetUI();
+                            break;
+
+                        case 'pick':
+                            log('File picked!');
+                            handleFilePicked(command);
+                            messagePort.postMessage({
+                                type: 'result',
+                                id: payload.id,
+                                data: {
+                                    result: 'success'
+                                }
+                            });
+                            if (pickerWindow) {
+                                pickerWindow.close();
+                            }
+                            break;
+
+                        default:
+                            messagePort.postMessage({
+                                type: 'result',
+                                id: payload.id,
+                                data: {
+                                    result: 'error',
+                                    error: {
+                                        code: 'unsupportedCommand',
+                                        message: command.command
+                                    }
+                                }
+                            });
+                            break;
+                    }
+                    break;
+            }
+        }
+
+        // Handle picked file
+        function handleFilePicked(command) {
+            const items = command.items || [];
+            if (items.length > 0) {
+                const item = items[0];
+                log(`File selected: ${item.name || 'Unknown'}`);
+                log(`Drive ID: ${item.parentReference?.driveId}`);
+                log(`Item ID: ${item.id}`);
+                log(`Endpoint: ${item['@@sharePoint.endpoint']}`);
+
+                selectedFileInfo = {
+                    itemId: item.id,
+                    driveId: item.parentReference?.driveId,
+                    sharePointEndpoint: item['@@sharePoint.endpoint'],
+                    fileName: item.name || 'file.csv'
+                };
+
+                // Store token info for CSV download
+                sessionStorage.setItem('pickedFile', JSON.stringify(selectedFileInfo));
+                sessionStorage.setItem('baseUrl', currentBaseUrl);
+
+                // Show selected file
+                document.getElementById('instructions').classList.add('d-none');
+                document.getElementById('loadingIndicator').classList.add('d-none');
+                document.getElementById('selectedFile').classList.remove('d-none');
+                document.getElementById('selectedFileName').textContent = 
+                    `${selectedFileInfo.fileName}`;
+            }
+        }
+
+        // View the selected CSV - download using Microsoft Graph API
+        async function viewCsv() {
+            if (selectedFileInfo) {
+                try {
+                    log('Downloading CSV file via Microsoft Graph...');
+                    
+                    // Get Graph token with Files.Read.All scope
+                    const token = await getGraphToken();
+                    
+                    // Use Microsoft Graph API to download the file content
+                    // Graph endpoint: /drives/{driveId}/items/{itemId}/content
+                    const downloadUrl = `https://graph.microsoft.com/v1.0/drives/${selectedFileInfo.driveId}/items/${selectedFileInfo.itemId}/content`;
+                    
+                    log(`Graph API: GET ${downloadUrl}`);
+                    
+                    const response = await fetch(downloadUrl, {
+                        headers: {
+                            'Authorization': `Bearer ${token}`
+                        }
+                    });
+                    
+                    if (!response.ok) {
+                        throw new Error(`Failed to download: ${response.status}`);
+                    }
+                    
+                    const csvContent = await response.text();
+                    log('CSV downloaded successfully');
+                    
+                    // Store in session and redirect to viewer
+                    sessionStorage.setItem('csvContent', csvContent);
+                    sessionStorage.setItem('csvFileName', selectedFileInfo.fileName);
+                    window.location.href = '/CsvViewer/DisplayFromSession';
+                    
+                } catch (error) {
+                    log(`Error downloading CSV: ${error.message}`);
+                    alert('Failed to download CSV file. See activity log for details.');
+                }
+            }
+        }
+
+        // Reset UI
+        function resetUI() {
+            document.getElementById('loadingIndicator').classList.add('d-none');
+            document.getElementById('instructions').classList.remove('d-none');
+            document.getElementById('selectedFile').classList.add('d-none');
+        }
+
+        // Event listeners
+        document.getElementById('btnPickOneDrive').addEventListener('click', () => openFilePicker('onedrive'));
+        document.getElementById('btnPickSharePoint').addEventListener('click', () => openFilePicker('sharepoint'));
+        document.getElementById('btnPickShared').addEventListener('click', () => openFilePicker('shared'));
+        document.getElementById('btnViewCsv').addEventListener('click', viewCsv);
+        
+        // Retry auth on token status click
+        document.getElementById('tokenStatus').addEventListener('click', async () => {
+            if (!isAuthenticated) {
+                await initializeAuth();
+            }
+        });
+
+        // Initialize on page load
+        log('File picker demo initialized');
+        log(`Client ID: ${clientId}`);
+        log(`Tenant ID: ${tenantId}`);
+        log(`OneDrive URL: ${ONEDRIVE_URL}`);
+        log(`SharePoint URL: ${SHAREPOINT_URL}`);
+        log('Using MSAL.js for client-side token acquisition');
+        
+        // Start authentication immediately
+        initializeAuth();
+    </script>
+}

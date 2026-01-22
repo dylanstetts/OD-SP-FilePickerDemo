@@ -1,0 +1,50 @@
+@{
+    ViewData["Title"] = "Home";
+}
+
+<div class="text-center mt-4">
+    <h1 class="display-4">OneDrive & SharePoint CSV File Picker</h1>
+    <p class="lead">A demo application showing how to replace the deprecated SharedWithMe Graph API</p>
+</div>
+
+<div class="row mt-5">
+    <div class="col-md-6">
+        <div class="card h-100">
+            <div class="card-header bg-success text-white">
+                <h5 class="mb-0">OneDrive File Picker v8</h5>
+            </div>
+            <div class="card-body">
+                <p>This demo uses the <a href="https://learn.microsoft.com/en-us/onedrive/developer/controls/file-pickers/?view=odsp-graph-online" target="_blank">OneDrive File Picker v8</a> control which provides:</p>
+                <ul>
+                    <li>Access to user's personal OneDrive files</li>
+                    <li>Access to SharePoint sites and libraries</li>
+                    <li>Files shared with the user (replacement for SharedWithMe API)</li>
+                    <li>Recent files access</li>
+                </ul>
+                <p class="text-muted">The picker is hosted within Microsoft's service and communicates via postMessage.</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card h-100">
+            <div class="card-header bg-info text-white">
+                <h5 class="mb-0">Scanning Guidance</h5>
+            </div>
+            <div class="card-body">
+                <p>For background <a href="https://learn.microsoft.com/en-us/onedrive/developer/rest-api/concepts/scan-guidance?view=odsp-graph-online" target="_blank">scanning scenarios</a>, you can also use:</p>
+                <ul>
+                    <li><strong>Delta Query</strong> - Efficiently track changes across drives</li>
+                    <li><strong>Webhooks</strong> - Real-time notifications for file changes</li>
+                    <li><strong>Site Enumeration</strong> - Discover SharePoint sites and OneDrive drives</li>
+                </ul>
+                <p class="text-muted">These patterns replace polling and full enumeration approaches. However, these will not be used in this demo.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="text-center mt-5">
+    <a asp-controller="Home" asp-action="FilePicker" class="btn btn-primary btn-lg">
+        Launch File Picker
+    </a>
+</div>

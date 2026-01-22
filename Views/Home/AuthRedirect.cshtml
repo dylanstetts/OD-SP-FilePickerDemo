@@ -1,0 +1,59 @@
+@{
+    Layout = null;
+}
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Authenticating...</title>
+</head>
+<body>
+    <div style="display: flex; justify-content: center; align-items: center; height: 100vh; font-family: Arial, sans-serif;">
+        <div style="text-align: center;">
+            <div style="font-size: 24px; margin-bottom: 10px;"></div>
+            <div id="status">Completing authentication...</div>
+        </div>
+    </div>
+    <!--
+        MSAL popup flow: This page is the redirect target for popups.
+        MSAL.js must be loaded - it will automatically detect it's in a popup
+        and communicate the auth result back to the opener window.
+    -->
+    <script src="https://alcdn.msauth.net/browser/2.38.0/js/msal-browser.min.js"></script>
+    <script>
+        // For popup flow, MSAL automatically handles communication back to opener
+        // We just need to ensure MSAL is loaded and initialized
+        
+        const msalConfig = {
+            auth: {
+                clientId: '@ViewBag.ClientId',
+                authority: 'https://login.microsoftonline.com/@ViewBag.TenantId',
+                redirectUri: window.location.origin + '/Home/AuthRedirect'
+            },
+            cache: {
+                cacheLocation: "sessionStorage"
+            }
+        };
+
+        // Create and initialize MSAL - this triggers the popup response handling
+        const msalInstance = new msal.PublicClientApplication(msalConfig);
+        
+        msalInstance.initialize().then(() => {
+            // For popup flow, just calling handleRedirectPromise is enough
+            // MSAL will parse the URL, communicate back to opener, and may close the popup
+            return msalInstance.handleRedirectPromise();
+        }).then((response) => {
+            if (response) {
+                document.getElementById('status').textContent = 'Success! This window should close...';
+                console.log('Auth response handled in popup');
+            }
+            // Try to close if we're still open after a delay
+            setTimeout(() => {
+                try { window.close(); } catch(e) {}
+            }, 1500);
+        }).catch((error) => {
+            console.error('Popup auth error:', error);
+            document.getElementById('status').textContent = 'Error: ' + error.message;
+        });
+    </script>
+</body>
+</html>
